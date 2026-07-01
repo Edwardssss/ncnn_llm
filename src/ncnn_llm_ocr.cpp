@@ -394,10 +394,10 @@ std::shared_ptr<ncnn_llm_gpt_ctx> ncnn_llm_ocr::prefill(const std::string& promp
     // Tokenize prompt
     std::vector<int> token_ids = bpe_->encode(full_prompt, false, false);
 
-    // Step 4: Get text embeddings
+    // Get text embeddings
     ncnn::Mat token_embed = llm_run_text_embed(*text_embed_net_, token_ids);
 
-    // Step 5: Find image token positions and inject vision features
+    // Find image token positions and inject vision features
     std::vector<int> image_token_positions;
     for (int i = 0; i < (int)token_ids.size(); i++) {
         if (token_ids[i] == image_token_id_) {
@@ -417,7 +417,7 @@ std::shared_ptr<ncnn_llm_gpt_ctx> ncnn_llm_ocr::prefill(const std::string& promp
                num_vision_tokens, (int)image_token_positions.size());
     }
 
-    // Step 6: Generate causal mask
+    // Generate causal mask
     int seq_len = (int)token_ids.size();
     ncnn::Mat mask(seq_len, seq_len);
     mask.fill(0.0f);
@@ -428,7 +428,7 @@ std::shared_ptr<ncnn_llm_gpt_ctx> ncnn_llm_ocr::prefill(const std::string& promp
         }
     }
 
-    // Step 7: Generate MRoPE cache for text decoder (image tokens have 2D positions)
+    // Generate MRoPE cache for text decoder (image tokens have 2D positions)
     // GLM-OCR text decoder uses interleaved RoPE with cos/sin shape [seq_len, 64]
     ncnn::Mat cos_cache, sin_cache;
     int next_position_id = seq_len;
@@ -442,19 +442,19 @@ std::shared_ptr<ncnn_llm_gpt_ctx> ncnn_llm_ocr::prefill(const std::string& promp
         generate_text_rope_cache(seq_len, 0, cos_cache, sin_cache);
     }
 
-    // Step 8: Run decoder (prefill pass, no existing KV cache)
+    // Run decoder (prefill pass, no existing KV cache)
     KVCache kv_cache;
     ncnn::Mat decode_out = llm_run_decoder_with_kv(*text_decoder_net_, token_embed, mask, cos_cache, sin_cache,
                                                    kv_cache, attn_cnt_, true);
 
-    // Step 9: Run lm_head on the last token
+    // Run lm_head on the last token
     ncnn::Mat last_hidden = decode_out.row_range(seq_len - 1, 1);
     ncnn::Mat logits = llm_run_lm_head(*lm_head_net_, last_hidden);
 
-    // Step 10: Get next token via argmax
+    // Get next token via argmax
     int next_token_id = argmax1d(logits);
 
-    // Step 11: Create and return context
+    // Create and return context
     auto ctx = std::make_shared<ncnn_llm_gpt_base_ctx>();
     ctx->kv_cache = std::move(kv_cache);
     ctx->cur_token = next_token_id;
@@ -575,10 +575,8 @@ void ncnn_llm_ocr::smart_resize_hunyuan(int img_h, int img_w, int& target_h, int
 ncnn::Mat ncnn_llm_ocr::bgr_to_chw_image_hunyuan(const ncnn::Mat& bgr, int& target_h, int& target_w) const {
     smart_resize_hunyuan(bgr.h, bgr.w, target_h, target_w);
 
-    // Resize to the smart-resized target, then ToTensor(/255)+Normalize. The HF processor
-    // uses PIL antialiased BICUBIC; ncnn's bilinear drifts the emitted box coordinates by
-    // ~1-2px, which is acceptable here.
-    ncnn::Mat resized = ncnn_mat_resize(bgr, target_w, target_h);  // interleaved BGR u8
+    // PIL resizes the uint8 image with BICUBIC, then ToTensor(/255)+Normalize.
+    ncnn::Mat resized = ncnn_mat_resize_bicubic(bgr, target_w, target_h);  // interleaved BGR u8
     const unsigned char* data = (const unsigned char*)resized.data;
 
     ncnn::Mat img(target_w, target_h, 3);  // planar float; channel 0=R, 1=G, 2=B
