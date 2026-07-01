@@ -69,3 +69,17 @@ void generate_rope_embed_cache_vision_mrope_interleaved(int seqlen,
                                                         ncnn::Mat& cos_cache,
                                                         ncnn::Mat& sin_cache,
                                                         float rope_theta = 100000);
+
+// HunyuanOCR 4-axis xdrope. pos4 = { linear, w, h, t }, each of length seq_len.
+// Produces cos/sin caches of shape (rope_head_dim/2, seq_len) with an NTK-alpha base:
+//   base = rope_theta * alpha^(rope_head_dim/(rope_head_dim-2));
+//   inv_freq[j] = 1 / base^(2j/rope_head_dim);
+// dim j uses axis = xdrope_section prefix (e.g. [16,16,16,16] -> j/16).
+void generate_hunyuan_xdrope_cos_sin(const std::vector<int>* pos4,
+                                     int seq_len,
+                                     int rope_head_dim,
+                                     const std::vector<int>& xdrope_section,
+                                     float rope_theta,
+                                     float alpha,
+                                     ncnn::Mat& cos_cache,
+                                     ncnn::Mat& sin_cache);

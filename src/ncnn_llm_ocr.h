@@ -39,6 +39,7 @@ public:
                                                std::function<void(const std::string&)> callback);
 
     bool ok() const { return ok_; }
+    const std::string& model_type() const { return model_type_; }
 
 private:
     std::shared_ptr<ncnn::Net> vision_net_;
@@ -47,6 +48,20 @@ private:
     std::shared_ptr<ncnn::Net> lm_head_net_;
     std::shared_ptr<BpeTokenizer> bpe_;
     std::unordered_set<int> additional_special_id_set_;
+
+    std::string model_type_ = "glm_ocr";
+
+    // --- HunyuanOCR-specific settings (model_type_ == "hunyuan_ocr") ---
+    bool use_kv_cache_ = true;
+    float rope_alpha_ = 1000.0f;
+    std::vector<int> xdrope_section_;
+    int bos_id_ = -1;
+    int system_end_id_ = -1;
+    int user_end_id_ = -1;
+    int image_start_id_ = -1;
+    int image_end_id_ = -1;
+    int special_id_begin_ = 0x7fffffff;
+    std::unordered_set<int> eos_ids_;
 
     int attn_cnt_ = 16;
     int hidden_size_ = 1536;
@@ -77,4 +92,13 @@ private:
     ncnn::Mat run_vision(const ncnn::Mat& image_strip, const ncnn::Mat& cos_cache, const ncnn::Mat& sin_cache) const;
 
     void generate_text_rope_cache(int seq_len, int position_id, ncnn::Mat& cos_cache, ncnn::Mat& sin_cache) const;
+
+    // --- HunyuanOCR path ---
+    void smart_resize_hunyuan(int img_h, int img_w, int& target_h, int& target_w) const;
+    ncnn::Mat bgr_to_chw_image_hunyuan(const ncnn::Mat& bgr, int& target_h, int& target_w) const;
+    ncnn::Mat run_vision_hunyuan(const ncnn::Mat& image_chw) const;
+    std::shared_ptr<ncnn_llm_gpt_ctx> prefill_hunyuan(const std::string& prompt_text, const ncnn::Mat& bgr_image);
+    std::shared_ptr<ncnn_llm_gpt_ctx> generate_hunyuan(const std::shared_ptr<ncnn_llm_gpt_ctx>& ctx,
+                                                       const GenerateConfig& cfg,
+                                                       std::function<void(const std::string&)> callback);
 };

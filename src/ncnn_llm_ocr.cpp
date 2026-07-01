@@ -9,6 +9,9 @@ ncnn_llm_ocr::ncnn_llm_ocr(const std::string& model_path, bool use_vulkan, int n
             std::ifstream ifs(model_path + "/model.json");
             ifs >> config;
         }
+        if (config.contains("model_type")) {
+            model_type_ = config["model_type"].get<std::string>();
+        }
 
         vision_net_ = std::make_shared<ncnn::Net>();
         text_embed_net_ = std::make_shared<ncnn::Net>();
@@ -42,7 +45,7 @@ ncnn_llm_ocr::ncnn_llm_ocr(const std::string& model_path, bool use_vulkan, int n
         std::string lm_head_param = model_path + "/" + config["params"]["lm_head_param"].get<std::string>();
         std::string lm_head_bin = model_path + "/" + config["params"]["lm_head_bin"].get<std::string>();
 
-        printf("Loading GLM-OCR model from %s\n", model_path.c_str());
+        printf("Loading OCR model (%s) from %s\n", model_type_.c_str(), model_path.c_str());
         printf("  vision param: %s\n", vision_param.c_str());
         printf("  vision bin: %s\n", vision_bin.c_str());
         printf("  text_embed param: %s\n", text_embed_param.c_str());
@@ -85,6 +88,11 @@ ncnn_llm_ocr::ncnn_llm_ocr(const std::string& model_path, bool use_vulkan, int n
         eos_ = (eos_token != "") ? bpe_->token_to_id().at(eos_token) : -1;
         auto it_eop = bpe_->token_to_id().find("<eop>");
         eop_ = (it_eop != bpe_->token_to_id().end()) ? it_eop->second : -1;
+        if (config["tokenizer"].contains("eos_ids")) {
+            for (auto& v : config["tokenizer"]["eos_ids"]) {
+                eos_ids_.insert(v.get<int>());
+            }
+        }
 
         if (config["setting"].contains("attn_cnt")) {
             attn_cnt_ = config["setting"]["attn_cnt"].get<int>();
@@ -95,87 +103,42 @@ ncnn_llm_ocr::ncnn_llm_ocr(const std::string& model_path, bool use_vulkan, int n
         if (config["setting"].contains("head_dim")) {
             head_dim_ = config["setting"]["head_dim"].get<int>();
         }
-        if (config["setting"].contains("rope")) {
-            auto text_rope_cfg = config["setting"]["rope"];
-            if (!text_rope_cfg.contains("type") || text_rope_cfg["type"].get<std::string>() != "mRoPE") {
-                throw std::runtime_error("unsupported setting.rope.type in model.json");
-            }
-            if (text_rope_cfg.contains("rope_theta")) {
-                rope_theta_ = text_rope_cfg["rope_theta"].get<float>();
-            }
-            if (text_rope_cfg.contains("rope_head_dim")) {
-                head_dim_ = text_rope_cfg["rope_head_dim"].get<int>();
-            }
-            if (!text_rope_cfg.contains("mrope_section")) {
-                throw std::runtime_error("missing setting.rope.mrope_section in model.json");
-            }
-            for (auto& v : text_rope_cfg["mrope_section"]) {
-                mrope_section_.push_back(v.get<int>());
-            }
-        } else if (config["setting"].contains("rope_theta") || config["setting"].contains("mrope_section")) {
-            throw std::runtime_error("legacy setting.rope_theta/mrope_section is not supported; use setting.rope");
-        } else {
-            throw std::runtime_error("missing setting.rope in model.json");
-        }
-        if (mrope_section_.size() != 3) {
-            throw std::runtime_error("setting.rope.mrope_section must have 3 entries");
-        }
         if (config["setting"].contains("image_token_id")) {
             image_token_id_ = config["setting"]["image_token_id"].get<int>();
         }
 
-        if (config["setting"].contains("vision")) {
+        if (model_type_ == "hunyuan_ocr") {
+            // ---- HunyuanOCR: 4-axis xdrope, vision without RoPE, no KV cache ----
+            use_kv_cache_ = config["setting"].value("kv_cache", false);
+            auto rope_cfg = config["setting"]["rope"];
+            if (!rope_cfg.contains("type") || rope_cfg["type"].get<std::string>() != "xdrope") {
+                throw std::runtime_error("hunyuan_ocr requires setting.rope.type == xdrope");
+            }
+            rope_theta_ = rope_cfg.value("rope_theta", 10000.0f);
+            head_dim_ = rope_cfg.value("rope_head_dim", head_dim_);
+            rope_alpha_ = rope_cfg.value("alpha", 1000.0f);
+            for (auto& v : rope_cfg["xdrope_section"]) {
+                xdrope_section_.push_back(v.get<int>());
+            }
+            int sect_sum = 0;
+            for (int s : xdrope_section_) sect_sum += s;
+            if (xdrope_section_.empty() || sect_sum != head_dim_ / 2) {
+                throw std::runtime_error("setting.rope.xdrope_section must sum to rope_head_dim/2");
+            }
+
+            bos_id_ = config["setting"].value("bos_token_id", 120000);
+            system_end_id_ = config["setting"].value("system_end_token_id", 120021);
+            user_end_id_ = config["setting"].value("user_end_token_id", 120006);
+            image_start_id_ = config["setting"].value("image_start_token_id", 120118);
+            image_end_id_ = config["setting"].value("image_end_token_id", 120119);
+            special_id_begin_ = config["setting"].value("special_token_id_begin", 120000);
+
             auto vision_cfg = config["setting"]["vision"];
-            if (vision_cfg.contains("patch_size")) {
-                patch_size_ = vision_cfg["patch_size"].get<int>();
-            }
-            if (vision_cfg.contains("spatial_merge_size")) {
-                spatial_merge_size_ = vision_cfg["spatial_merge_size"].get<int>();
-            }
-            if (vision_cfg.contains("vision_hidden_size")) {
-                vision_hidden_size_ = vision_cfg["vision_hidden_size"].get<int>();
-            }
-            if (vision_cfg.contains("vision_head_dim")) {
-                vision_head_dim_ = vision_cfg["vision_head_dim"].get<int>();
-            }
-            if (vision_cfg.contains("vision_num_heads")) {
-                vision_num_heads_ = vision_cfg["vision_num_heads"].get<int>();
-            }
-            if (!vision_cfg.contains("rope")) {
-                throw std::runtime_error("missing setting.vision.rope in model.json");
-            }
-            auto vision_rope_cfg = vision_cfg["rope"];
-            if (!vision_rope_cfg.contains("type") || vision_rope_cfg["type"].get<std::string>() != "mRoPE") {
-                throw std::runtime_error("unsupported setting.vision.rope.type in model.json");
-            }
-            if (vision_rope_cfg.contains("rope_theta")) {
-                vision_rope_theta_ = vision_rope_cfg["rope_theta"].get<float>();
-            }
-            if (vision_rope_cfg.contains("rope_head_dim")) {
-                vision_rope_dim_ = vision_rope_cfg["rope_head_dim"].get<int>();
-            }
-            if (!vision_rope_cfg.contains("mrope_section")) {
-                throw std::runtime_error("missing setting.vision.rope.mrope_section in model.json");
-            }
-            for (auto& v : vision_rope_cfg["mrope_section"]) {
-                vision_mrope_section_.push_back(v.get<int>());
-            }
-            if (vision_rope_theta_ <= 0.0f || vision_rope_dim_ <= 0 || (vision_rope_dim_ % 2) != 0) {
-                throw std::runtime_error("invalid setting.vision.rope rope_theta/rope_head_dim in model.json");
-            }
-            if (vision_mrope_section_.size() != 2 ||
-                vision_mrope_section_[0] + vision_mrope_section_[1] != vision_rope_dim_) {
-                throw std::runtime_error("setting.vision.rope.mrope_section must be [h_dim,w_dim] and sum to rope_head_dim");
-            }
-            if (vision_cfg.contains("max_num_patches")) {
-                max_num_patches_ = vision_cfg["max_num_patches"].get<int>();
-            }
-            if (vision_cfg.contains("min_pixels")) {
-                min_pixels_ = vision_cfg["min_pixels"].get<long long>();
-            }
-            if (vision_cfg.contains("max_pixels")) {
-                max_pixels_ = vision_cfg["max_pixels"].get<long long>();
-            }
+            patch_size_ = vision_cfg.value("patch_size", 16);
+            spatial_merge_size_ = vision_cfg.value("spatial_merge_size", 2);
+            vision_hidden_size_ = vision_cfg.value("vision_hidden_size", 1152);
+            if (vision_cfg.contains("min_pixels")) min_pixels_ = vision_cfg["min_pixels"].get<long long>();
+            if (vision_cfg.contains("max_pixels")) max_pixels_ = vision_cfg["max_pixels"].get<long long>();
             if (vision_cfg.contains("image_mean")) {
                 auto mean = vision_cfg["image_mean"].get<std::vector<float>>();
                 image_mean_[0] = mean[0]; image_mean_[1] = mean[1]; image_mean_[2] = mean[2];
@@ -184,19 +147,117 @@ ncnn_llm_ocr::ncnn_llm_ocr(const std::string& model_path, bool use_vulkan, int n
                 auto std_vals = vision_cfg["image_std"].get<std::vector<float>>();
                 image_std_[0] = std_vals[0]; image_std_[1] = std_vals[1]; image_std_[2] = std_vals[2];
             }
-        }
 
-        vocab_size_ = (int)bpe_->vocab_size();
-        printf("  attn_cnt: %d, hidden_size: %d, head_dim: %d, vocab_size: %d\n", attn_cnt_, hidden_size_, head_dim_, vocab_size_);
-        printf("  patch_size: %d, spatial_merge_size: %d, max_num_patches: %d\n", patch_size_, spatial_merge_size_, max_num_patches_);
-        printf("  text mrope_section: [%d %d %d]\n", mrope_section_[0], mrope_section_[1], mrope_section_[2]);
-        printf("  vision rope: type=mRoPE, rope_theta=%.1f, rope_head_dim=%d, mrope_section=[%d %d]\n",
-               vision_rope_theta_, vision_rope_dim_, vision_mrope_section_[0], vision_mrope_section_[1]);
-        printf("  min_pixels: %lld, max_pixels: %lld, image_mean/std: [%.6f %.6f %.6f] / [%.6f %.6f %.6f]\n",
-               min_pixels_, max_pixels_,
-               image_mean_[0], image_mean_[1], image_mean_[2],
-               image_std_[0], image_std_[1], image_std_[2]);
-        printf("  image_token_id: %d, eos: %d, eop: %d\n", image_token_id_, eos_, eop_);
+            vocab_size_ = config["setting"].value("vocab_size", (int)bpe_->vocab_size());
+            printf("  [hunyuan_ocr] attn_cnt: %d, hidden_size: %d, head_dim: %d, vocab_size: %d\n",
+                   attn_cnt_, hidden_size_, head_dim_, vocab_size_);
+            printf("  [hunyuan_ocr] patch_size: %d, merge_size: %d, min/max_pixels: %lld/%lld\n",
+                   patch_size_, spatial_merge_size_, min_pixels_, max_pixels_);
+            printf("  [hunyuan_ocr] rope_theta: %.1f, alpha: %.1f, xdrope_section size: %d, kv_cache: %d\n",
+                   rope_theta_, rope_alpha_, (int)xdrope_section_.size(), (int)use_kv_cache_);
+            printf("  [hunyuan_ocr] image_token_id: %d, image_start: %d, image_end: %d, bos: %d, user_end: %d\n",
+                   image_token_id_, image_start_id_, image_end_id_, bos_id_, user_end_id_);
+        } else {
+            if (config["setting"].contains("rope")) {
+                auto text_rope_cfg = config["setting"]["rope"];
+                if (!text_rope_cfg.contains("type") || text_rope_cfg["type"].get<std::string>() != "mRoPE") {
+                    throw std::runtime_error("unsupported setting.rope.type in model.json");
+                }
+                if (text_rope_cfg.contains("rope_theta")) {
+                    rope_theta_ = text_rope_cfg["rope_theta"].get<float>();
+                }
+                if (text_rope_cfg.contains("rope_head_dim")) {
+                    head_dim_ = text_rope_cfg["rope_head_dim"].get<int>();
+                }
+                if (!text_rope_cfg.contains("mrope_section")) {
+                    throw std::runtime_error("missing setting.rope.mrope_section in model.json");
+                }
+                for (auto& v : text_rope_cfg["mrope_section"]) {
+                    mrope_section_.push_back(v.get<int>());
+                }
+            } else if (config["setting"].contains("rope_theta") || config["setting"].contains("mrope_section")) {
+                throw std::runtime_error("legacy setting.rope_theta/mrope_section is not supported; use setting.rope");
+            } else {
+                throw std::runtime_error("missing setting.rope in model.json");
+            }
+            if (mrope_section_.size() != 3) {
+                throw std::runtime_error("setting.rope.mrope_section must have 3 entries");
+            }
+
+            if (config["setting"].contains("vision")) {
+                auto vision_cfg = config["setting"]["vision"];
+                if (vision_cfg.contains("patch_size")) {
+                    patch_size_ = vision_cfg["patch_size"].get<int>();
+                }
+                if (vision_cfg.contains("spatial_merge_size")) {
+                    spatial_merge_size_ = vision_cfg["spatial_merge_size"].get<int>();
+                }
+                if (vision_cfg.contains("vision_hidden_size")) {
+                    vision_hidden_size_ = vision_cfg["vision_hidden_size"].get<int>();
+                }
+                if (vision_cfg.contains("vision_head_dim")) {
+                    vision_head_dim_ = vision_cfg["vision_head_dim"].get<int>();
+                }
+                if (vision_cfg.contains("vision_num_heads")) {
+                    vision_num_heads_ = vision_cfg["vision_num_heads"].get<int>();
+                }
+                if (!vision_cfg.contains("rope")) {
+                    throw std::runtime_error("missing setting.vision.rope in model.json");
+                }
+                auto vision_rope_cfg = vision_cfg["rope"];
+                if (!vision_rope_cfg.contains("type") || vision_rope_cfg["type"].get<std::string>() != "mRoPE") {
+                    throw std::runtime_error("unsupported setting.vision.rope.type in model.json");
+                }
+                if (vision_rope_cfg.contains("rope_theta")) {
+                    vision_rope_theta_ = vision_rope_cfg["rope_theta"].get<float>();
+                }
+                if (vision_rope_cfg.contains("rope_head_dim")) {
+                    vision_rope_dim_ = vision_rope_cfg["rope_head_dim"].get<int>();
+                }
+                if (!vision_rope_cfg.contains("mrope_section")) {
+                    throw std::runtime_error("missing setting.vision.rope.mrope_section in model.json");
+                }
+                for (auto& v : vision_rope_cfg["mrope_section"]) {
+                    vision_mrope_section_.push_back(v.get<int>());
+                }
+                if (vision_rope_theta_ <= 0.0f || vision_rope_dim_ <= 0 || (vision_rope_dim_ % 2) != 0) {
+                    throw std::runtime_error("invalid setting.vision.rope rope_theta/rope_head_dim in model.json");
+                }
+                if (vision_mrope_section_.size() != 2 ||
+                    vision_mrope_section_[0] + vision_mrope_section_[1] != vision_rope_dim_) {
+                    throw std::runtime_error("setting.vision.rope.mrope_section must be [h_dim,w_dim] and sum to rope_head_dim");
+                }
+                if (vision_cfg.contains("max_num_patches")) {
+                    max_num_patches_ = vision_cfg["max_num_patches"].get<int>();
+                }
+                if (vision_cfg.contains("min_pixels")) {
+                    min_pixels_ = vision_cfg["min_pixels"].get<long long>();
+                }
+                if (vision_cfg.contains("max_pixels")) {
+                    max_pixels_ = vision_cfg["max_pixels"].get<long long>();
+                }
+                if (vision_cfg.contains("image_mean")) {
+                    auto mean = vision_cfg["image_mean"].get<std::vector<float>>();
+                    image_mean_[0] = mean[0]; image_mean_[1] = mean[1]; image_mean_[2] = mean[2];
+                }
+                if (vision_cfg.contains("image_std")) {
+                    auto std_vals = vision_cfg["image_std"].get<std::vector<float>>();
+                    image_std_[0] = std_vals[0]; image_std_[1] = std_vals[1]; image_std_[2] = std_vals[2];
+                }
+            }
+
+            vocab_size_ = (int)bpe_->vocab_size();
+            printf("  attn_cnt: %d, hidden_size: %d, head_dim: %d, vocab_size: %d\n", attn_cnt_, hidden_size_, head_dim_, vocab_size_);
+            printf("  patch_size: %d, spatial_merge_size: %d, max_num_patches: %d\n", patch_size_, spatial_merge_size_, max_num_patches_);
+            printf("  text mrope_section: [%d %d %d]\n", mrope_section_[0], mrope_section_[1], mrope_section_[2]);
+            printf("  vision rope: type=mRoPE, rope_theta=%.1f, rope_head_dim=%d, mrope_section=[%d %d]\n",
+                   vision_rope_theta_, vision_rope_dim_, vision_mrope_section_[0], vision_mrope_section_[1]);
+            printf("  min_pixels: %lld, max_pixels: %lld, image_mean/std: [%.6f %.6f %.6f] / [%.6f %.6f %.6f]\n",
+                   min_pixels_, max_pixels_,
+                   image_mean_[0], image_mean_[1], image_mean_[2],
+                   image_std_[0], image_std_[1], image_std_[2]);
+            printf("  image_token_id: %d, eos: %d, eop: %d\n", image_token_id_, eos_, eop_);
+        }
 
     } catch (std::exception &e) {
         ok_ = false;
@@ -302,6 +363,9 @@ void ncnn_llm_ocr::generate_text_rope_cache(int seq_len, int position_id, ncnn::
 }
 
 std::shared_ptr<ncnn_llm_gpt_ctx> ncnn_llm_ocr::prefill(const std::string& prompt_text, const ncnn::Mat& bgr_image) {
+    if (model_type_ == "hunyuan_ocr") {
+        return prefill_hunyuan(prompt_text, bgr_image);
+    }
     // Run vision model
     int num_patches_h = 0, num_patches_w = 0;
     ncnn::Mat image_strip = bgr_to_image_strip(bgr_image, num_patches_h, num_patches_w);
@@ -403,6 +467,10 @@ std::shared_ptr<ncnn_llm_gpt_ctx> ncnn_llm_ocr::generate(
     const GenerateConfig& cfg,
     std::function<void(const std::string&)> callback) {
 
+    if (model_type_ == "hunyuan_ocr") {
+        return generate_hunyuan(ctx_in, cfg, callback);
+    }
+
     auto ctx = ctx_in->clone();
     std::unordered_set<int> history;
     history.insert(ctx->cur_token);
@@ -454,6 +522,212 @@ std::shared_ptr<ncnn_llm_gpt_ctx> ncnn_llm_ocr::generate(
         ncnn::Mat decode_out = llm_run_decoder_with_kv(*text_decoder_net_, cur_embed, mask, cos_cache, sin_cache,
                                                        ctx->kv_cache, attn_cnt_, false);
 
+        ncnn::Mat logits = llm_run_lm_head(*lm_head_net_, decode_out);
+
+        LlmTokenSampleConfig sample_cfg;
+        sample_cfg.vocab_size = vocab_size_;
+        sample_cfg.temperature = cfg.temperature;
+        sample_cfg.top_p = cfg.top_p;
+        sample_cfg.top_k = cfg.top_k;
+        sample_cfg.repetition_penalty = cfg.repetition_penalty;
+        sample_cfg.do_sample = cfg.do_sample;
+        int next_id = llm_select_next_token(logits, history, sample_cfg);
+
+        ctx->cur_token = next_id;
+        history.insert(next_id);
+    }
+
+    return ctx;
+}
+
+// ============================================================================ HunyuanOCR path
+
+void ncnn_llm_ocr::smart_resize_hunyuan(int img_h, int img_w, int& target_h, int& target_w) const {
+    const long long factor = (long long)patch_size_ * spatial_merge_size_; // 32
+
+    auto round_half_even = [](double x) -> long long {
+        double fl = std::floor(x);
+        double diff = x - fl;
+        if (diff < 0.5) return (long long)fl;
+        if (diff > 0.5) return (long long)fl + 1;
+        long long lo = (long long)fl;                 // exactly .5 -> round to even (Python round)
+        return (lo % 2 == 0) ? lo : lo + 1;
+    };
+
+    long long h_bar = std::max(factor, round_half_even((double)img_h / (double)factor) * factor);
+    long long w_bar = std::max(factor, round_half_even((double)img_w / (double)factor) * factor);
+    const double area = (double)img_h * (double)img_w;
+
+    if (h_bar * w_bar > (long long)max_pixels_) {
+        double beta = std::sqrt(area / (double)max_pixels_);
+        h_bar = std::max(factor, (long long)std::floor(img_h / beta / factor) * factor);
+        w_bar = std::max(factor, (long long)std::floor(img_w / beta / factor) * factor);
+    } else if (h_bar * w_bar < (long long)min_pixels_) {
+        double beta = std::sqrt((double)min_pixels_ / area);
+        h_bar = (long long)std::ceil(img_h * beta / factor) * factor;
+        w_bar = (long long)std::ceil(img_w * beta / factor) * factor;
+    }
+
+    target_h = (int)h_bar;
+    target_w = (int)w_bar;
+}
+
+ncnn::Mat ncnn_llm_ocr::bgr_to_chw_image_hunyuan(const ncnn::Mat& bgr, int& target_h, int& target_w) const {
+    smart_resize_hunyuan(bgr.h, bgr.w, target_h, target_w);
+
+    // Resize to the smart-resized target, then ToTensor(/255)+Normalize. The HF processor
+    // uses PIL antialiased BICUBIC; ncnn's bilinear drifts the emitted box coordinates by
+    // ~1-2px, which is acceptable here.
+    ncnn::Mat resized = ncnn_mat_resize(bgr, target_w, target_h);  // interleaved BGR u8
+    const unsigned char* data = (const unsigned char*)resized.data;
+
+    ncnn::Mat img(target_w, target_h, 3);  // planar float; channel 0=R, 1=G, 2=B
+    for (int y = 0; y < target_h; y++) {
+        const unsigned char* row = data + (size_t)y * target_w * 3;
+        float* rr = img.channel(0).row(y);
+        float* gg = img.channel(1).row(y);
+        float* bb = img.channel(2).row(y);
+        for (int x = 0; x < target_w; x++) {
+            const unsigned char* px = row + (size_t)x * 3;  // stored B,G,R
+            rr[x] = (px[2] / 255.0f - image_mean_[0]) / image_std_[0];
+            gg[x] = (px[1] / 255.0f - image_mean_[1]) / image_std_[1];
+            bb[x] = (px[0] / 255.0f - image_mean_[2]) / image_std_[2];
+        }
+    }
+    return img;
+}
+
+ncnn::Mat ncnn_llm_ocr::run_vision_hunyuan(const ncnn::Mat& image_chw) const {
+    ncnn::Mat feats;
+    ncnn::Extractor ex = vision_net_->create_extractor();
+    ex.input("in0", image_chw);
+    ex.extract("out0", feats);
+    return feats;
+}
+
+std::shared_ptr<ncnn_llm_gpt_ctx> ncnn_llm_ocr::prefill_hunyuan(const std::string& prompt_text,
+                                                                const ncnn::Mat& bgr_image) {
+    int target_h = 0, target_w = 0;
+    ncnn::Mat image_chw = bgr_to_chw_image_hunyuan(bgr_image, target_h, target_w);
+    int gh = target_h / patch_size_;
+    int gw = target_w / patch_size_;
+    int patch_h = gh / spatial_merge_size_;
+    int patch_w = gw / spatial_merge_size_;
+    int num_vision_tokens = patch_h * (patch_w + 1) + 2;
+
+    ncnn::Mat vision_features = run_vision_hunyuan(image_chw);
+    if (vision_features.h != num_vision_tokens) {
+        printf("[ncnn_llm_ocr] WARNING: vision token count %d != expected %d (grid %dx%d)\n",
+               vision_features.h, num_vision_tokens, gh, gw);
+        num_vision_tokens = vision_features.h;
+    }
+    printf("[ncnn_llm_ocr] hunyuan vision: resized %dx%d, grid %dx%d, vision_tokens=%d\n",
+           target_w, target_h, gh, gw, num_vision_tokens);
+
+    // Assemble token ids directly (special tokens by id, prompt text via bbpe).
+    std::vector<int> text_ids = bpe_->encode(prompt_text, false, false);
+    std::vector<int> token_ids;
+    token_ids.reserve(3 + num_vision_tokens + text_ids.size() + 1);
+    token_ids.push_back(bos_id_);
+    token_ids.push_back(system_end_id_);
+    token_ids.push_back(image_start_id_);
+    int first_image_index = (int)token_ids.size();
+    for (int i = 0; i < num_vision_tokens; i++) token_ids.push_back(image_token_id_);
+    token_ids.push_back(image_end_id_);
+    for (int t : text_ids) token_ids.push_back(t);
+    token_ids.push_back(user_end_id_);
+
+    int seq_len = (int)token_ids.size();
+
+    // Text embeddings + inject vision features into the image-token slots (in order).
+    ncnn::Mat token_embed = llm_run_text_embed(*text_embed_net_, token_ids);
+    for (int i = 0; i < num_vision_tokens; i++) {
+        float* dst = token_embed.row(first_image_index + i);
+        const float* src = vision_features.row(i);
+        memcpy(dst, src, hidden_size_ * sizeof(float));
+    }
+
+    // Build 4-axis position ids (axis0 linear; grid tokens carry (w,h,0)).
+    std::vector<int> pos_lin(seq_len), pos_w(seq_len), pos_h(seq_len), pos_t(seq_len);
+    for (int i = 0; i < seq_len; i++) {
+        pos_lin[i] = i; pos_w[i] = i; pos_h[i] = i; pos_t[i] = i;
+    }
+    int start = first_image_index + 1;  // skip the leading "begin" vision token
+    for (int r = 0; r < patch_h; r++) {
+        for (int c = 0; c < patch_w + 1; c++) {
+            int idx = start + r * (patch_w + 1) + c;
+            if (idx >= seq_len) break;
+            pos_w[idx] = c;
+            pos_h[idx] = r;
+            pos_t[idx] = 0;
+        }
+    }
+
+    // Prefill decode with KV cache (empty cache in).
+    const std::vector<int> pos4[4] = { pos_lin, pos_w, pos_h, pos_t };
+    ncnn::Mat cos_cache, sin_cache;
+    generate_hunyuan_xdrope_cos_sin(pos4, seq_len, head_dim_, xdrope_section_,
+                                    rope_theta_, rope_alpha_, cos_cache, sin_cache);
+
+    ncnn::Mat mask(seq_len, seq_len);
+    mask.fill(0.0f);
+    for (int i = 0; i < seq_len; i++) {
+        float* row = mask.row(i);
+        for (int j = i + 1; j < seq_len; j++) row[j] = -1e38f;
+    }
+
+    KVCache kv_cache;
+    ncnn::Mat decode_out = llm_run_decoder_with_kv(*text_decoder_net_, token_embed, mask,
+                                                   cos_cache, sin_cache, kv_cache, attn_cnt_, true);
+    ncnn::Mat last_hidden = decode_out.row_range(seq_len - 1, 1);
+    ncnn::Mat logits = llm_run_lm_head(*lm_head_net_, last_hidden);
+    int next_token_id = argmax1d(logits);
+
+    auto ctx = std::make_shared<ncnn_llm_gpt_base_ctx>();
+    ctx->kv_cache = std::move(kv_cache);
+    ctx->cur_token = next_token_id;
+    ctx->position_id = seq_len;
+    return ctx;
+}
+
+std::shared_ptr<ncnn_llm_gpt_ctx> ncnn_llm_ocr::generate_hunyuan(
+    const std::shared_ptr<ncnn_llm_gpt_ctx>& ctx_in,
+    const GenerateConfig& cfg,
+    std::function<void(const std::string&)> callback) {
+
+    auto ctx = ctx_in->clone();
+    std::unordered_set<int> history;
+    history.insert(ctx->cur_token);
+
+    for (int step = 0; step < cfg.max_new_tokens; ++step) {
+        int tok = ctx->cur_token;
+        if (eos_ids_.count(tok)) break;
+
+        // Emit the current token (skip special / added tokens, e.g. box markers).
+        bool is_special = (tok >= special_id_begin_) ||
+                          (additional_special_id_set_.find(tok) != additional_special_id_set_.end());
+        if (!is_special) {
+            std::string token_text = bpe_->decode({tok}, true);
+            if (!token_text.empty()) callback(token_text);
+        }
+
+        // Single-token embedding.
+        ncnn::Mat cur_embed = llm_run_text_embed(*text_embed_net_, tok);
+
+        // Generated text tokens: all 4 xdrope axes = current linear position.
+        std::vector<int> p1(1, ctx->position_id);
+        const std::vector<int> pos4[4] = { p1, p1, p1, p1 };
+        ncnn::Mat cos_cache, sin_cache;
+        generate_hunyuan_xdrope_cos_sin(pos4, 1, head_dim_, xdrope_section_,
+                                        rope_theta_, rope_alpha_, cos_cache, sin_cache);
+        ctx->position_id++;
+
+        // Mask [1, kv_len+1] all zeros: the new token attends to all cached positions + itself.
+        ncnn::Mat mask(1, ctx->kv_cache[0].first.h + 1);
+        mask.fill(0.0f);
+
+        ncnn::Mat decode_out = llm_run_decoder_with_kv(*text_decoder_net_, cur_embed, mask,
+                                                       cos_cache, sin_cache, ctx->kv_cache, attn_cnt_, false);
         ncnn::Mat logits = llm_run_lm_head(*lm_head_net_, decode_out);
 
         LlmTokenSampleConfig sample_cfg;

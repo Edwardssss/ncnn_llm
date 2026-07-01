@@ -53,6 +53,7 @@
 | VLM | Qwen3.5 | 已支持 | 图像 + 文本输入 |
 | VLM | Qwen2.5-VL | 已支持 | 图像 + 文本输入 |
 | OCR | GLM-OCR | 已支持 | OCR |
+| OCR | HunyuanOCR | 已支持 | OCR |
 | 翻译 | NLLB | 已支持 | 翻译示例 |
 | 嵌入 | Jina-Embeddings-v5-Text-Nano | 已支持 | 768 维文本嵌入 |
 | 嵌入 | Jina-CLIP-v2 | 已支持 | 1024 维文本 + 图像嵌入 |

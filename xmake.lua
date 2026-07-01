@@ -78,6 +78,10 @@ target("llm_ncnn_run")
     add_deps("ncnn_llm")
     add_packages("ncnn", "nlohmann_json")
 
+    if is_plat("windows", "mingw") then
+        add_syslinks("shell32")
+    end
+
     set_rundir("$(projectdir)/")
 
 target("benchllm")
@@ -124,8 +128,13 @@ target("clip_main")
 
 target("ocr_main")
     set_kind("binary")
+    add_includedirs("examples/")
     add_files("examples/ocr_main.cpp")
     add_deps("ncnn_llm")
     add_packages("ncnn", "nlohmann_json")
+
+    if is_plat("windows", "mingw") then
+        add_syslinks("shell32")
+    end
 
     set_rundir("$(projectdir)/")
