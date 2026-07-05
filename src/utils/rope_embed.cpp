@@ -403,3 +403,48 @@ void generate_rope_embed_cache_vision_mrope(int seqlen,
         }
     }
 }
+void generate_hunyuan_xdrope_cos_sin(const std::vector<int>* pos4,
+                                     int seq_len,
+                                     int rope_head_dim,
+                                     const std::vector<int>& xdrope_section,
+                                     float rope_theta,
+                                     float alpha,
+                                     ncnn::Mat& cos_cache,
+                                     ncnn::Mat& sin_cache) {
+    const int half = rope_head_dim / 2;
+    cos_cache.create(half, seq_len);
+    sin_cache.create(half, seq_len);
+
+    // NTK-alpha base: base = rope_theta * alpha^(head_dim/(head_dim-2))
+    const double base_corr = std::pow((double)alpha,
+                                      (double)rope_head_dim / ((double)rope_head_dim - 2.0));
+    const double ntk_theta = (double)rope_theta * base_corr;
+
+    std::vector<float> inv_freq(half);
+    for (int j = 0; j < half; j++) {
+        inv_freq[j] = (float)(1.0 / std::pow(ntk_theta, (double)(2 * j) / (double)rope_head_dim));
+    }
+
+    // axis index per dim, from the (possibly unequal) section widths
+    std::vector<int> axis_of_dim(half, (int)xdrope_section.size() - 1);
+    {
+        int d = 0;
+        for (int a = 0; a < (int)xdrope_section.size() && d < half; a++) {
+            for (int s = 0; s < xdrope_section[a] && d < half; s++) {
+                axis_of_dim[d++] = a;
+            }
+        }
+    }
+
+    for (int i = 0; i < seq_len; i++) {
+        float* cos_ptr = cos_cache.row(i);
+        float* sin_ptr = sin_cache.row(i);
+        for (int j = 0; j < half; j++) {
+            const int a = axis_of_dim[j];
+            const float pos = (float)pos4[a][i];
+            const float t = pos * inv_freq[j];
+            cos_ptr[j] = cosf(t);
+            sin_ptr[j] = sinf(t);
+        }
+    }
+}

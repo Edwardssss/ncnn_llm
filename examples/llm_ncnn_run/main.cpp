@@ -1,12 +1,14 @@
 #include "cli_runner.h"
 #include "options.h"
 #include "tools.h"
+#include "utf8_args.h"
 
 #include "ncnn_llm_gpt.h"
 
 #include <filesystem>
 #include <iostream>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -22,7 +24,13 @@ std::string normalize_model_path(std::string path) {
 }
 
 int main(int argc, char** argv) {
-    Options opt = parse_options(argc, argv);
+    enable_utf8_console();
+    std::vector<std::string> utf8_args = get_utf8_args(argc, argv);
+    std::vector<char*> cargv;
+    cargv.reserve(utf8_args.size());
+    for (auto& s : utf8_args) cargv.push_back(const_cast<char*>(s.c_str()));
+
+    Options opt = parse_options((int)cargv.size(), cargv.data());
     opt.model_path = normalize_model_path(opt.model_path);
 
     if (!std::filesystem::exists(opt.model_path)) {
