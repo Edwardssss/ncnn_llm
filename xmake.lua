@@ -133,6 +133,15 @@ target("ocr_main")
     add_deps("ncnn_llm")
     add_packages("ncnn", "nlohmann_json")
 
+    set_rundir("$(projectdir)/")
+
+target("youtu_vl_main")
+    set_kind("binary")
+    add_files("examples/youtu_vl_main.cpp")
+    add_deps("ncnn_llm")
+    add_packages("ncnn", "nlohmann_json")
+
+    set_rundir("$(projectdir)/")
     if is_plat("windows", "mingw") then
         add_syslinks("shell32")
     end

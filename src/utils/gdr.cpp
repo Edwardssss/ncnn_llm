@@ -1,4 +1,5 @@
 #include "gdr.h"
+#include "mla_attention.h"
 #include <cmath>
 #include <cstring>
 
@@ -359,4 +360,5 @@ void register_gdr_layers(ncnn::Net& net)
 {
     net.register_custom_layer("GatedDeltaRule", GatedDeltaRule_creator, GatedDeltaRule_destroyer);
     net.register_custom_layer("ShortConv", ShortConv_creator, ShortConv_destroyer);
+    net.register_custom_layer("MlaAttention", MlaAttention_creator, MlaAttention_destroyer);
 }

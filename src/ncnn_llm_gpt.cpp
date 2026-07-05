@@ -72,8 +72,13 @@ ncnn_llm_gpt::ncnn_llm_gpt(const std::string& model_path, bool use_vulkan, int n
 
         register_gdr_layers(*decoder_net);
 
-        decoder_net->load_param(decoder_param.c_str());
-        decoder_net->load_model(decoder_bin.c_str());
+        bool skip_decoder = (config["type"].get<std::string>() == "youtu_vl");
+        if (!skip_decoder) {
+            decoder_net->load_param(decoder_param.c_str());
+            decoder_net->load_model(decoder_bin.c_str());
+        } else {
+            printf("  decoder: SKIPPED (youtu_vl uses standalone YoutuMlaDecoder)\n");
+        }
         embed_net->load_param(embed_param.c_str());
         embed_net->load_model(embed_bin.c_str());
         proj_out_net->load_param(proj_out_param.c_str());
@@ -130,6 +135,8 @@ ncnn_llm_gpt::ncnn_llm_gpt(const std::string& model_path, bool use_vulkan, int n
                 rope_type = RoPE_Type::NTK_RoPE;
             } else if (rope_cfg["type"] == "YaRNRoPE") {
                 rope_type = RoPE_Type::YARN_RoPE;
+            } else if (rope_cfg["type"] == "InterleaveRoPE") {
+                rope_type = RoPE_Type::InterleaveRoPE;
             }
 
             if (rope_cfg.contains("rope_scaling"))
@@ -144,6 +151,21 @@ ncnn_llm_gpt::ncnn_llm_gpt(const std::string& model_path, bool use_vulkan, int n
 
             rope_theta = rope_cfg["rope_theta"].get<float>();
         }
+
+        if (config["setting"].contains("hidden_size"))
+            hidden_size = config["setting"]["hidden_size"].get<int>();
+        if (config["setting"].contains("mlp_intermediate_size"))
+            mlp_intermediate_size = config["setting"]["mlp_intermediate_size"].get<int>();
+        if (config["setting"].contains("q_lora_rank"))
+            q_lora_rank = config["setting"]["q_lora_rank"].get<int>();
+        if (config["setting"].contains("kv_lora_rank"))
+            kv_lora_rank = config["setting"]["kv_lora_rank"].get<int>();
+        if (config["setting"].contains("qk_nope_head_dim"))
+            qk_nope_head_dim = config["setting"]["qk_nope_head_dim"].get<int>();
+        if (config["setting"].contains("qk_rope_head_dim"))
+            qk_rope_head_dim = config["setting"]["qk_rope_head_dim"].get<int>();
+        if (config["setting"].contains("v_head_dim"))
+            v_head_dim = config["setting"]["v_head_dim"].get<int>();
 
         if (config["setting"].contains("functions")) {
             auto func_cfg = config["setting"]["functions"];
@@ -182,29 +204,30 @@ ncnn_llm_gpt::ncnn_llm_gpt(const std::string& model_path, bool use_vulkan, int n
                     vision_type = Vision_Type::VISION_VIT;
                 } else if (vision_type_str == "qwen3.5_vl") {
                     vision_type = Vision_Type::VISION_QWEN3_5_VL;
+                } else if (vision_type_str == "youtu_vl") {
+                    vision_type = Vision_Type::VISION_YOUTU_VL;
                 }
-                
-                std::string vision_embed_patch_param = model_path + "/" + vision_cfg["vision_embed_patch_param"].get<std::string>();
-                std::string vision_embed_patch_bin = model_path + "/" + vision_cfg["vision_embed_patch_bin"].get<std::string>();
                 std::string vision_encoder_param = model_path + "/" + vision_cfg["vision_encoder_param"].get<std::string>();
                 std::string vision_encoder_bin = model_path + "/" + vision_cfg["vision_encoder_bin"].get<std::string>();
 
-                fprintf(stderr, "  vision embed patch param: %s\n", vision_embed_patch_param.c_str());
-                fprintf(stderr, "  vision embed patch bin: %s\n", vision_embed_patch_bin.c_str());
                 fprintf(stderr, "  vision encoder param: %s\n", vision_encoder_param.c_str());
                 fprintf(stderr, "  vision encoder bin: %s\n", vision_encoder_bin.c_str());
 
-                vision_embed_patch = std::make_shared<ncnn::Net>();
                 vision_encoder = std::make_shared<ncnn::Net>();
-
-                if (use_vulkan) {
-                    vision_embed_patch->opt.use_vulkan_compute = true;
-                    vision_encoder->opt.use_vulkan_compute = true;
-                }
-                vision_embed_patch->load_param(vision_embed_patch_param.c_str());
-                vision_embed_patch->load_model(vision_embed_patch_bin.c_str());
+                if (use_vulkan) vision_encoder->opt.use_vulkan_compute = true;
                 vision_encoder->load_param(vision_encoder_param.c_str());
                 vision_encoder->load_model(vision_encoder_bin.c_str());
+
+                if (vision_type_str != "youtu_vl") {
+                    std::string vision_embed_patch_param = model_path + "/" + vision_cfg["vision_embed_patch_param"].get<std::string>();
+                    std::string vision_embed_patch_bin = model_path + "/" + vision_cfg["vision_embed_patch_bin"].get<std::string>();
+                    fprintf(stderr, "  vision embed patch param: %s\n", vision_embed_patch_param.c_str());
+                    fprintf(stderr, "  vision embed patch bin: %s\n", vision_embed_patch_bin.c_str());
+                    vision_embed_patch = std::make_shared<ncnn::Net>();
+                    if (use_vulkan) vision_embed_patch->opt.use_vulkan_compute = true;
+                    vision_embed_patch->load_param(vision_embed_patch_param.c_str());
+                    vision_embed_patch->load_model(vision_embed_patch_bin.c_str());
+                }
 
                 if (vision_cfg.contains("vision_embed_pos_param")) {
                     std::string vision_embed_pos_param = model_path + "/" + vision_cfg["vision_embed_pos_param"].get<std::string>();
@@ -237,6 +260,24 @@ ncnn_llm_gpt::ncnn_llm_gpt(const std::string& model_path, bool use_vulkan, int n
                         vision_rope_type = VisionRoPE_Type::mRoPE;
                         mrope_section = rope_cfg["mrope_section"].get<std::vector<int>>();
                     }
+                }
+
+                if (vision_cfg.contains("vision_merger_rms_param")) {
+                    std::string rms_param = model_path + "/" + vision_cfg["vision_merger_rms_param"].get<std::string>();
+                    std::string rms_bin = model_path + "/" + vision_cfg["vision_merger_rms_bin"].get<std::string>();
+                    vision_merger_rms = std::make_shared<ncnn::Net>();
+                    if (use_vulkan) vision_merger_rms->opt.use_vulkan_compute = true;
+                    vision_merger_rms->load_param(rms_param.c_str());
+                    vision_merger_rms->load_model(rms_bin.c_str());
+                }
+
+                if (vision_cfg.contains("vision_merger_param")) {
+                    std::string merger_param = model_path + "/" + vision_cfg["vision_merger_param"].get<std::string>();
+                    std::string merger_bin = model_path + "/" + vision_cfg["vision_merger_bin"].get<std::string>();
+                    vision_merger = std::make_shared<ncnn::Net>();
+                    if (use_vulkan) vision_merger->opt.use_vulkan_compute = true;
+                    vision_merger->load_param(merger_param.c_str());
+                    vision_merger->load_model(merger_bin.c_str());
                 }
             }
         }
@@ -1293,5 +1334,47 @@ int ncnn_llm_gpt::get_visiual_features(const ncnn::Mat& bgr, ncnn::Mat& image_em
         memcpy(dst_ptr, src_ptr, image_embeds.w * sizeof(float));
     }
     image_embeds = image_embeds_restored;
+    return 0;
+}
+
+int ncnn_llm_gpt::get_visiual_features_youtu_vl(const ncnn::Mat& bgr, ncnn::Mat& image_embeds,
+                                                  int& num_patches_w, int& num_patches_h) const
+{
+    const int effective_patch = patch_size * spatial_merge_size;
+    get_image_size_for_patches(bgr.h, bgr.w, patch_size, max_num_patches, num_patches_h, num_patches_w);
+
+    // Smart resize and convert BGR→RGB+normalize → pixel_values
+    ncnn::Mat pixel_values = bgr_to_pixel_values(bgr);
+
+    // Vision encoder
+    ncnn::Mat encoder_out;
+    {
+        ncnn::Extractor ex = vision_encoder->create_extractor();
+        ex.input("in0", pixel_values);
+        ex.extract("out0", encoder_out);
+    }
+
+    // RMSNorm
+    ncnn::Mat normed;
+    {
+        ncnn::Extractor ex = vision_merger_rms->create_extractor();
+        ex.input("in0", encoder_out);
+        ex.extract("out0", normed);
+    }
+
+    // 2×2 spatial merge
+    ncnn::Mat reordered = reorder_patches_for_merge(normed, num_patches_h, num_patches_w, spatial_merge_size);
+
+    // MLP: Linear → GELU → Linear
+    ncnn::Mat merged;
+    {
+        ncnn::Extractor ex = vision_merger->create_extractor();
+        ex.input("in0", reordered);
+        ex.extract("out0", merged);
+    }
+
+    num_patches_w /= spatial_merge_size;
+    num_patches_h /= spatial_merge_size;
+    image_embeds = merged;
     return 0;
 }

@@ -89,16 +89,17 @@ public:
 };
 
 class ncnn_llm_gpt {
-private:
+protected:
     std::shared_ptr<ncnn::Net> decoder_net;
     std::shared_ptr<ncnn::Net> embed_net;
     std::shared_ptr<ncnn::Net> proj_out_net;
     std::shared_ptr<ncnn::Net> vision_embed_patch;
     std::shared_ptr<ncnn::Net> vision_embed_pos;
     std::shared_ptr<ncnn::Net> vision_encoder;
+    std::shared_ptr<ncnn::Net> vision_merger;
+    std::shared_ptr<ncnn::Net> vision_merger_rms;
     std::shared_ptr<BpeTokenizer> bpe;
 
-protected:
     std::string model_type;
     int bos = 0;
     int eos = 0;
@@ -115,7 +116,8 @@ protected:
         RoPE = 0,
         LongRoPE = 1,
         NTK_RoPE = 2,
-        YARN_RoPE = 3
+        YARN_RoPE = 3,
+        InterleaveRoPE = 4
     } rope_type;
     float rope_theta = 100000.0f;
 
@@ -134,7 +136,8 @@ protected:
     enum Vision_Type {
         VISION_CLOSE = 0,
         VISION_VIT = 1,
-        VISION_QWEN3_5_VL = 2
+        VISION_QWEN3_5_VL = 2,
+        VISION_YOUTU_VL = 3
     } vision_type;
 
     enum VisionRoPE_Type {
@@ -143,6 +146,14 @@ protected:
 
     std::vector<int> mrope_section;
     std::vector<nlohmann::json> tools;
+
+    int hidden_size = 2560;
+    int mlp_intermediate_size = 9728;
+    int q_lora_rank = 1536;
+    int kv_lora_rank = 512;
+    int qk_nope_head_dim = 128;
+    int qk_rope_head_dim = 64;
+    int v_head_dim = 128;
 
 public:
     ncnn_llm_gpt(const std::string& model_path, bool use_vulkan = false, int num_threads = 0, int vulkan_device = 0);
@@ -187,11 +198,12 @@ public:
         };
     }
 
-private:
+protected:
     int get_scaled_image_size(float scale, int size, int effective_patch_size) const;
     void get_image_size_for_patches(int image_height, int image_width, int patch_size, int max_num_patches, int& target_height, int& target_width) const;
     ncnn::Mat bgr_to_pixel_values(const ncnn::Mat& bgr) const;
     ncnn::Mat reorder_patches_for_merge(const ncnn::Mat& pixel_values, int h_patches, int w_patches, int merge_size = 2) const;
     void get_window_index(int num_patches_w, int num_patches_h, std::vector<int>& window_index, std::vector<int>& cu_window_seqlens) const;
     int get_visiual_features(const ncnn::Mat& bgr, ncnn::Mat& image_embeds, int& num_patches_w, int& num_patches_h) const;
+    int get_visiual_features_youtu_vl(const ncnn::Mat& bgr, ncnn::Mat& image_embeds, int& num_patches_w, int& num_patches_h) const;
 };
