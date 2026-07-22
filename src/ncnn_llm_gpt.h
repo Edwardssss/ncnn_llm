@@ -31,10 +31,10 @@ using nlohmann::json;
 
 struct GenerateConfig {
     int max_new_tokens = 4096;
-    float temperature = 0.3f;
-    float top_p = 0.8f;
+    float temperature = 0.1f;
+    float top_p = 0.001f;
     int top_k = 50;
-    float repetition_penalty = 1.1f;
+    float repetition_penalty = 1.05f;
     int do_sample = 1;
 
     std::function<nlohmann::json(const nlohmann::json&)> tool_callback = nullptr;
@@ -100,6 +100,7 @@ protected:
     std::shared_ptr<ncnn::Net> vision_merger_rms;
     std::shared_ptr<BpeTokenizer> bpe;
 
+    std::string model_path_;
     std::string model_type;
     int bos = 0;
     int eos = 0;

@@ -29,7 +29,8 @@ ncnn::Mat llm_run_decoder_with_kv(ncnn::Net& decoder_net,
                                   int attn_cnt,
                                   bool is_prefill);
 
-ncnn::Mat llm_run_lm_head(ncnn::Net& lm_head_net, const ncnn::Mat& hidden_states);
+ncnn::Mat llm_run_lm_head(ncnn::Net& lm_head_net, const ncnn::Mat& hidden_states,
+                          const std::string& model_path);
 
 int llm_select_next_token(const ncnn::Mat& logits,
                           const std::unordered_set<int>& history,

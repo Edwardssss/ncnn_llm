@@ -16,7 +16,7 @@ static std::shared_ptr<ncnn_llm_gpt_ctx> create_ctx(int sconv_cnt, int gdr_cnt) 
 // Class Implementation
 
 ncnn_llm_gpt::ncnn_llm_gpt(const std::string& model_path, bool use_vulkan, int num_threads, int vulkan_device) 
-    : vision_type(Vision_Type::VISION_CLOSE) {
+    : model_path_(model_path), vision_type(Vision_Type::VISION_CLOSE) {
     try {
         json config;
         {
@@ -172,11 +172,11 @@ ncnn_llm_gpt::ncnn_llm_gpt(const std::string& model_path, bool use_vulkan, int n
             if (func_cfg["type"].get<std::string>() == "tool_call") {
                 if (func_cfg.contains("tool_call_id")) {
                     tool_call_id = bpe->token_to_id().at(func_cfg["tool_call_id"].get<std::string>());
-                    fprintf(stderr, "  tool_call_id: %d\n", tool_call_id);
+                    printf("  tool_call_id: %d\n", tool_call_id);
                 }
                 if (func_cfg.contains("tool_call_end_id")) {
                     tool_call_end_id = bpe->token_to_id().at(func_cfg["tool_call_end_id"].get<std::string>());
-                    fprintf(stderr, "  tool_call_end_id: %d\n", tool_call_end_id);
+                    printf("  tool_call_end_id: %d\n", tool_call_end_id);
                 }
             }
         }
@@ -185,12 +185,12 @@ ncnn_llm_gpt::ncnn_llm_gpt(const std::string& model_path, bool use_vulkan, int n
         auto it_think = bpe->token_to_id().find("<think>");
         if (it_think != bpe->token_to_id().end()) {
             think_id = it_think->second;
-            fprintf(stderr, "  think_id: %d\n", think_id);
+            printf("  think_id: %d\n", think_id);
         }
         auto it_think_end = bpe->token_to_id().find("</think>");
         if (it_think_end != bpe->token_to_id().end()) {
             think_end_id = it_think_end->second;
-            fprintf(stderr, "  think_end_id: %d\n", think_end_id);
+            printf("  think_end_id: %d\n", think_end_id);
         }
 
         // Vision settings
@@ -210,8 +210,8 @@ ncnn_llm_gpt::ncnn_llm_gpt(const std::string& model_path, bool use_vulkan, int n
                 std::string vision_encoder_param = model_path + "/" + vision_cfg["vision_encoder_param"].get<std::string>();
                 std::string vision_encoder_bin = model_path + "/" + vision_cfg["vision_encoder_bin"].get<std::string>();
 
-                fprintf(stderr, "  vision encoder param: %s\n", vision_encoder_param.c_str());
-                fprintf(stderr, "  vision encoder bin: %s\n", vision_encoder_bin.c_str());
+                printf("  vision encoder param: %s\n", vision_encoder_param.c_str());
+                printf("  vision encoder bin: %s\n", vision_encoder_bin.c_str());
 
                 vision_encoder = std::make_shared<ncnn::Net>();
                 if (use_vulkan) vision_encoder->opt.use_vulkan_compute = true;
@@ -221,8 +221,8 @@ ncnn_llm_gpt::ncnn_llm_gpt(const std::string& model_path, bool use_vulkan, int n
                 if (vision_type_str != "youtu_vl") {
                     std::string vision_embed_patch_param = model_path + "/" + vision_cfg["vision_embed_patch_param"].get<std::string>();
                     std::string vision_embed_patch_bin = model_path + "/" + vision_cfg["vision_embed_patch_bin"].get<std::string>();
-                    fprintf(stderr, "  vision embed patch param: %s\n", vision_embed_patch_param.c_str());
-                    fprintf(stderr, "  vision embed patch bin: %s\n", vision_embed_patch_bin.c_str());
+                    printf("  vision embed patch param: %s\n", vision_embed_patch_param.c_str());
+                    printf("  vision embed patch bin: %s\n", vision_embed_patch_bin.c_str());
                     vision_embed_patch = std::make_shared<ncnn::Net>();
                     if (use_vulkan) vision_embed_patch->opt.use_vulkan_compute = true;
                     vision_embed_patch->load_param(vision_embed_patch_param.c_str());
@@ -232,8 +232,8 @@ ncnn_llm_gpt::ncnn_llm_gpt(const std::string& model_path, bool use_vulkan, int n
                 if (vision_cfg.contains("vision_embed_pos_param")) {
                     std::string vision_embed_pos_param = model_path + "/" + vision_cfg["vision_embed_pos_param"].get<std::string>();
                     std::string vision_embed_pos_bin = model_path + "/" + vision_cfg["vision_embed_pos_bin"].get<std::string>();
-                    fprintf(stderr, "  vision embed pos param: %s\n", vision_embed_pos_param.c_str());
-                    fprintf(stderr, "  vision embed pos bin: %s\n", vision_embed_pos_bin.c_str());
+                    printf("  vision embed pos param: %s\n", vision_embed_pos_param.c_str());
+                    printf("  vision embed pos bin: %s\n", vision_embed_pos_bin.c_str());
                     
                     vision_embed_pos = std::make_shared<ncnn::Net>();
                     if (use_vulkan) {
@@ -1008,7 +1008,7 @@ std::shared_ptr<ncnn_llm_gpt_ctx> ncnn_llm_gpt::generate(const std::shared_ptr<n
             ex.extract("out0", decode_out);
         }
 
-        ncnn::Mat logits_mat = llm_run_lm_head(*proj_out_net, decode_out);
+        ncnn::Mat logits_mat = llm_run_lm_head(*proj_out_net, decode_out, model_path_);
 
         LlmTokenSampleConfig sample_cfg;
         sample_cfg.vocab_size = vocab_size;
@@ -1062,7 +1062,8 @@ ncnn::Mat ncnn_llm_gpt::bgr_to_pixel_values(const ncnn::Mat& bgr) const {
     float image_mean[3] = {0.48145466f, 0.4578275f, 0.40821073f};
     float image_std[3] = {0.26862954f, 0.26130258f, 0.27577711f};
 
-    if (vision_type == Vision_Type::VISION_QWEN3_5_VL) {
+    // Youtu-VL (SigLIP2) preprocessor_config.json: mean=std=[0.5,0.5,0.5]
+    if (vision_type == Vision_Type::VISION_QWEN3_5_VL || vision_type == Vision_Type::VISION_YOUTU_VL) {
         image_mean[0] = 0.5f; image_mean[1] = 0.5f; image_mean[2] = 0.5f;
         image_std[0] = 0.5f; image_std[1] = 0.5f; image_std[2] = 0.5f;
     }
@@ -1085,36 +1086,49 @@ ncnn::Mat ncnn_llm_gpt::bgr_to_pixel_values(const ncnn::Mat& bgr) const {
         int start_y = ph * patch_size;
         int start_x = pw * patch_size;
 
-        float* out_ptr = pixel_values.row(p);
-        float* ptr_r = out_ptr;
-        float* ptr_g = out_ptr + patch_size * patch_size;
-        float* ptr_b = out_ptr + patch_size * patch_size * 2;
-
-        for (int y = 0; y < patch_size; y++) {
-            const unsigned char* img_row_ptr = NULL;
-            int cur_img_y = start_y + y;
-            if (cur_img_y < img_h) {
-                img_row_ptr = bgr_data + cur_img_y * img_w * 3;
+        // Youtu-VL: HF convert_image_to_patches produces RGB-interleaved:
+        //   [R(0,0),G(0,0),B(0,0), R(0,1),G(0,1),B(0,1), ...]
+        // The pnnx vision encoder's first Linear(768,1152) was trained on this layout.
+        if (vision_type == Vision_Type::VISION_YOUTU_VL) {
+            float* out_ptr = pixel_values.row(p);
+            for (int y = 0; y < patch_size; y++) {
+                const unsigned char* img_row_ptr = NULL;
+                int cur_img_y = start_y + y;
+                if (cur_img_y < img_h) img_row_ptr = bgr_data + cur_img_y * img_w * 3;
+                for (int x = 0; x < patch_size; x++) {
+                    int cur_img_x = start_x + x;
+                    if (img_row_ptr && cur_img_x < img_w) {
+                        const unsigned char* pixel = img_row_ptr + cur_img_x * 3;
+                        *out_ptr++ = (pixel[2] / 255.f - image_mean[0]) / image_std[0];  // R
+                        *out_ptr++ = (pixel[1] / 255.f - image_mean[1]) / image_std[1];  // G
+                        *out_ptr++ = (pixel[0] / 255.f - image_mean[2]) / image_std[2];  // B
+                    } else { *out_ptr++ = 0.f; *out_ptr++ = 0.f; *out_ptr++ = 0.f; }
+                }
             }
-
-            for (int x = 0; x < patch_size; x++) {
-                int cur_img_x = start_x + x;
-                if (img_row_ptr && cur_img_x < img_w) {
-                    const unsigned char* pixel = img_row_ptr + cur_img_x * 3;
-                    if (vision_type == Vision_Type::VISION_QWEN3_5_VL) {
-                        *ptr_r++ = (pixel[2] / 255.5f - image_mean[0]) / image_std[0];
-                        *ptr_g++ = (pixel[1] / 255.5f - image_mean[1]) / image_std[1];
-                        *ptr_b++ = (pixel[0] / 255.5f - image_mean[2]) / image_std[2];
-                    } else {
-                        *ptr_r++ = (pixel[2] / 255.f - image_mean[0]) / image_std[0];
-                        *ptr_g++ = (pixel[1] / 255.f - image_mean[1]) / image_std[1];
-                        *ptr_b++ = (pixel[0] / 255.f - image_mean[2]) / image_std[2];
-                    }
-                } else {
-                    float pad_val = 0.0f;
-                    *ptr_r++ = pad_val;
-                    *ptr_g++ = pad_val;
-                    *ptr_b++ = pad_val;
+        } else {
+            // Other vision types: channel-planar layout
+            float* out_ptr = pixel_values.row(p);
+            float* ptr_r = out_ptr;
+            float* ptr_g = out_ptr + patch_size * patch_size;
+            float* ptr_b = out_ptr + patch_size * patch_size * 2;
+            for (int y = 0; y < patch_size; y++) {
+                const unsigned char* img_row_ptr = NULL;
+                int cur_img_y = start_y + y;
+                if (cur_img_y < img_h) img_row_ptr = bgr_data + cur_img_y * img_w * 3;
+                for (int x = 0; x < patch_size; x++) {
+                    int cur_img_x = start_x + x;
+                    if (img_row_ptr && cur_img_x < img_w) {
+                        const unsigned char* pixel = img_row_ptr + cur_img_x * 3;
+                        if (vision_type == Vision_Type::VISION_QWEN3_5_VL) {
+                            *ptr_r++ = (pixel[2] / 255.5f - image_mean[0]) / image_std[0];
+                            *ptr_g++ = (pixel[1] / 255.5f - image_mean[1]) / image_std[1];
+                            *ptr_b++ = (pixel[0] / 255.5f - image_mean[2]) / image_std[2];
+                        } else {
+                            *ptr_r++ = (pixel[2] / 255.f - image_mean[0]) / image_std[0];
+                            *ptr_g++ = (pixel[1] / 255.f - image_mean[1]) / image_std[1];
+                            *ptr_b++ = (pixel[0] / 255.f - image_mean[2]) / image_std[2];
+                        }
+                    } else { *ptr_r++ = 0.f; *ptr_g++ = 0.f; *ptr_b++ = 0.f; }
                 }
             }
         }
@@ -1341,17 +1355,94 @@ int ncnn_llm_gpt::get_visiual_features_youtu_vl(const ncnn::Mat& bgr, ncnn::Mat&
                                                   int& num_patches_w, int& num_patches_h) const
 {
     const int effective_patch = patch_size * spatial_merge_size;
-    get_image_size_for_patches(bgr.h, bgr.w, patch_size, max_num_patches, num_patches_h, num_patches_w);
 
-    // Smart resize and convert BGR→RGB+normalize → pixel_values
-    ncnn::Mat pixel_values = bgr_to_pixel_values(bgr);
+    // Compute target size and resize (bug fix: was missing resize before pixel_values)
+    int target_h, target_w;
+    get_image_size_for_patches(bgr.h, bgr.w, patch_size, max_num_patches, target_h, target_w);
+    ncnn::Mat bgr_resized = ncnn_mat_resize(bgr, target_w, target_h);
 
-    // Vision encoder
+    num_patches_w = (target_w + patch_size - 1) / patch_size;
+    num_patches_h = (target_h + patch_size - 1) / patch_size;
+
+    // Convert BGR→RGB+normalize → pixel_values
+    ncnn::Mat pixel_values = bgr_to_pixel_values(bgr_resized);
+
+    int N = num_patches_h * num_patches_w;
+    ncnn::Mat pixels = pixel_values.reshape(768, N);
+
+    // Compute RoPE cos/sin dynamically to support variable patch counts
+    // Matches Python compute_rope_embeddings() exactly
+    int head_dim = 72;   // 36*2 (rotary_pos_emb duplicated then cos/sin)
+    int rope_dim = 36;   // hidden_size/num_heads/2 = 1152/16/2
+    ncnn::Mat emb_cos(head_dim, N);
+    ncnn::Mat emb_sin(head_dim, N);
+
+    {
+        int grid_h = num_patches_h;
+        int grid_w = num_patches_w;
+        int merge = spatial_merge_size;
+
+        // Build position IDs with spatial_merge interleaving
+        // matches HF: hpos_ids = reshape(permute(reshape(arange))).flatten()
+        std::vector<float> pos_h(N), pos_w(N);
+        int idx = 0;
+        for (int gh = 0; gh < grid_h / merge; gh++) {
+            for (int gw = 0; gw < grid_w / merge; gw++) {
+                for (int mh = 0; mh < merge; mh++) {
+                    for (int mw = 0; mw < merge; mw++) {
+                        pos_h[idx] = (float)(gh * merge + mh);
+                        pos_w[idx] = (float)(gw * merge + mw);
+                        idx++;
+                    }
+                }
+            }
+        }
+
+        // Compute inv_freq for each dimension: 1/(10000^(2*d/rope_dim))
+        std::vector<float> inv_freq(rope_dim / 2);  // 18 values
+        for (int d = 0; d < rope_dim / 2; d++) {
+            inv_freq[d] = 1.0f / std::pow(10000.0f, (2.0f * d) / (float)rope_dim);
+        }
+
+        // Compute cos/sin for each patch
+        // rotary_pos_emb = [N, 36] = [h_freqs(18), w_freqs(18)]
+        // emb = cat(rotary_pos_emb, rotary_pos_emb) = [N, 72]
+        // cos = cos(emb), sin = sin(emb)
+        for (int i = 0; i < N; i++) {
+            float* cos_row = emb_cos.row(i);
+            float* sin_row = emb_sin.row(i);
+            float ph = pos_h[i];
+            float pw = pos_w[i];
+            for (int d = 0; d < rope_dim / 2; d++) {
+                float fh = ph * inv_freq[d];
+                float fw = pw * inv_freq[d];
+                // First copy of rotary_pos_emb: h freqs [0:18], w freqs [18:36]
+                float ch = std::cos(fh), sh = std::sin(fh);
+                float cw = std::cos(fw), sw = std::sin(fw);
+                cos_row[d] = ch;
+                sin_row[d] = sh;
+                cos_row[d + rope_dim / 2] = cw;
+                sin_row[d + rope_dim / 2] = sw;
+                // Duplicated copy: h freqs [36:54], w freqs [54:72]
+                cos_row[d + rope_dim] = ch;
+                sin_row[d + rope_dim] = sh;
+                cos_row[d + rope_dim + rope_dim / 2] = cw;
+                sin_row[d + rope_dim + rope_dim / 2] = sw;
+            }
+        }
+    }
+
     ncnn::Mat encoder_out;
     {
         ncnn::Extractor ex = vision_encoder->create_extractor();
-        ex.input("in0", pixel_values);
-        ex.extract("out0", encoder_out);
+        ex.input("in0", pixels);
+        ex.input("in1", emb_cos);
+        ex.input("in2", emb_sin);
+        int ret = ex.extract("out0", encoder_out);
+        if (ret != 0) {
+            fprintf(stderr, "vision encoder extract failed, ret=%d\n", ret);
+            return -1;
+        }
     }
 
     // RMSNorm
@@ -1361,20 +1452,72 @@ int ncnn_llm_gpt::get_visiual_features_youtu_vl(const ncnn::Mat& bgr, ncnn::Mat&
         ex.input("in0", encoder_out);
         ex.extract("out0", normed);
     }
-
-    // 2×2 spatial merge
+    // 2×2 spatial merge: reorder then concat 4 patches → 4608-dim
+    // Matches HF YoutuPatchMerger: reshape → permute → flatten (concat) → MLP
     ncnn::Mat reordered = reorder_patches_for_merge(normed, num_patches_h, num_patches_w, spatial_merge_size);
 
-    // MLP: Linear → GELU → Linear
-    ncnn::Mat merged;
-    {
-        ncnn::Extractor ex = vision_merger->create_extractor();
-        ex.input("in0", reordered);
-        ex.extract("out0", merged);
+    int merged_h = num_patches_h / spatial_merge_size;
+    int merged_w = num_patches_w / spatial_merge_size;
+    int merged_count = merged_h * merged_w;
+    int cat_dim = normed.w * spatial_merge_size * spatial_merge_size;  // 1152*4=4608
+
+    ncnn::Mat concatenated(cat_dim, merged_count);
+    for (int i = 0; i < merged_count; i++) {
+        float* dst = concatenated.row(i);
+        for (int j = 0; j < spatial_merge_size * spatial_merge_size; j++) {
+            const float* src = reordered.row(i * spatial_merge_size * spatial_merge_size + j);
+            memcpy(dst + j * normed.w, src, normed.w * sizeof(float));
+        }
+    }
+
+    // Pure C++ merger: fc1(4608→4608) → GELU → fc2(4608→2560)
+    // Weights loaded once from youtu_merger_mlp.ncnn.bin, stored as [out_dim, in_dim]
+    static float* mer_w = nullptr;  // fc1w + fc1b + fc2w + fc2b
+    if (!mer_w) {
+        std::string mer_path = model_path_ + "/youtu_merger_mlp.ncnn.bin";
+        FILE* fp = fopen(mer_path.c_str(), "rb");
+        if (!fp) { fprintf(stderr, "merger: cannot open weight file\n"); return -1; }
+        // File has optional 4-byte flag (0x00000000) followed by weight data
+        unsigned int flag; fread(&flag, 4, 1, fp);
+        bool has_flag = (flag == 0);
+        if (!has_flag) fseek(fp, 0, SEEK_SET);  // No flag, rewind
+        mer_w = new float[4608*4608 + 4608 + 2560*4608 + 2560];
+        size_t n = fread(mer_w, 4, 4608*4608 + 4608 + 2560*4608 + 2560, fp);
+        fclose(fp);
+    }
+    float* fc1w = mer_w;
+    float* fc1b = mer_w + 4608*4608;
+    float* fc2w = mer_w + 4608*4608 + 4608;
+    float* fc2b = mer_w + 4608*4608 + 4608 + 2560*4608;
+
+    ncnn::Mat merged(2560, merged_count);
+    const float GELU_COEF = 0.044715f;
+    const float GELU_SQRT2PI = 0.7978845608f;  // sqrt(2/pi)
+
+#pragma omp parallel for
+    for (int t = 0; t < merged_count; t++) {
+        const float* inp = concatenated.row(t);
+        float fc1_out[4608];
+        for (int j = 0; j < 4608; j++) {
+            const float* w = fc1w + (size_t)j * 4608;
+            float s = fc1b[j];
+            for (int k = 0; k < 4608; k++) s += inp[k] * w[k];
+            float x3 = s * s * s;
+            float tval = tanhf(GELU_SQRT2PI * (s + GELU_COEF * x3));
+            fc1_out[j] = 0.5f * s * (1.0f + tval);
+        }
+        float* out = merged.row(t);
+        for (int j = 0; j < 2560; j++) {
+            const float* w = fc2w + (size_t)j * 4608;
+            float s = fc2b[j];
+            for (int k = 0; k < 4608; k++) s += fc1_out[k] * w[k];
+            out[j] = s;
+        }
     }
 
     num_patches_w /= spatial_merge_size;
     num_patches_h /= spatial_merge_size;
     image_embeds = merged;
+
     return 0;
 }

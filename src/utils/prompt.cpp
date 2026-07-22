@@ -138,7 +138,7 @@ static std::string apply_chatml_template(
 }
 
 // ==========================================
-// YOUTU LLM TEMPLATE
+// YOUTU VL CHAT TEMPLATE (HF: <|begin_of_text|> / <|end_of_text|> wrappers)
 // ==========================================
 
 static std::string apply_youtu_template(
@@ -148,141 +148,33 @@ static std::string apply_youtu_template(
 ) {
     std::stringstream prompt;
     
-    // Build system prompt
-    std::string system_prompt;
-    bool is_first_sp = true;
-    
-    // Collect system messages
-    for (const auto& msg : messages) {
-        if (msg.role == "system") {
-            if (is_first_sp) {
-                system_prompt += msg.content;
-                is_first_sp = false;
-            } else {
-                system_prompt += "\n\n" + msg.content;
-            }
-        }
-    }
-    
-    // Check if there are tool messages
-    bool has_tool_message = false;
-    size_t first_tool_index = messages.size();
-    
-    for (size_t i = 0; i < messages.size(); ++i) {
-        const auto& msg = messages[i];
-        if (!has_tool_message && 
-            (msg.role == "tool" || 
-             (msg.role == "user" && msg.content.rfind("<tool_response>", 0) == 0 &&
-              msg.content.find("</tool_response>") != std::string::npos))) {
-            has_tool_message = true;
-            first_tool_index = i;
-        }
-    }
-    
-    // Add tool descriptions if tools are provided
-    if (!tools.empty()) {
-        std::string tool_desc = "<|begin_of_tool_description|>Tool calling capabilities.\n"
-                               "You may call one or more functions to assist with the user query. You have the following functions available:";
-        
-        for (const auto& tool : tools) {
-            tool_desc += "\n```json\n" + tool.dump() + "\n```";
-        }
-        
-        tool_desc += "\nFor tool call returns, you MUST use the following format:\n"
-                    "<tool_call>{\"name\": \"function-name\", \"arguments\": {\"param1\": \"value1\", \"param2\": \"value2\"}}</tool_call>\n"
-                    "<|end_of_tool_description|>";
-        
-        if (system_prompt.empty()) {
-            system_prompt = tool_desc;
-        } else {
-            system_prompt += "\n\n" + tool_desc;
-        }
-    }
-    
-    // Output: bos_token + system_prompt
-    // Note: bos_token is typically handled by tokenizer, we just output system_prompt
-    if (!system_prompt.empty()) {
-        prompt << system_prompt;
-    }
-    
-    // Process messages
-    bool is_first = false;  // Not used in YouTu template like ChatML
-    bool is_tool = false;
-    bool is_last_user = false;
+    // Default system prompt (HF always adds when first message is not system)
+    bool has_system_first = !messages.empty() && messages[0].role == "system";
     
     for (size_t i = 0; i < messages.size(); ++i) {
         const auto& msg = messages[i];
         
-        if (msg.role == "system") continue;  // Already handled above
+        // If first message is not system, inject default system message
+        if (i == 0 && !has_system_first) {
+            prompt << "<|begin_of_text|>system\nYou are a helpful assistant.<|end_of_text|>\n";
+        }
         
-        if (msg.role == "user") {
-            is_tool = false;
-            is_first = false;
-            is_last_user = true;
-            
-            // Check if this is a tool response message
-            if (msg.content.rfind("<tool_response>", 0) == 0 &&
-                msg.content.find("</tool_response>") != std::string::npos) {
-                // Tool response is already formatted correctly
-                prompt << "<|User|>" << msg.content;
-            } else {
-                prompt << "<|User|>" << msg.content;
-            }
+        if (msg.role == "system") continue;  // system already handled above or skipped
+        
+        // Message header: <|begin_of_text|>role\n
+        prompt << "<|begin_of_text|>" << msg.role << "\n";
+        
+        if (msg.role == "user" || msg.role == "assistant") {
+            prompt << msg.content;
         }
-        else if (msg.role == "assistant") {
-            is_last_user = false;
-            std::string content = msg.content;
-            
-            // Handle <think> tags if present
-            std::string think_content;
-            size_t think_start = content.find("<think>");
-            size_t think_end = content.find("</think>");
-            
-            if (think_start != std::string::npos && think_end != std::string::npos) {
-                think_content = content.substr(think_start + 7, think_end - (think_start + 7));
-                think_content = lstrip_newlines(rstrip_newlines(think_content));
-                content = content.substr(0, think_start) + content.substr(think_end + 8);
-                content = lstrip_newlines(content);
-            }
-            
-            prompt << "<|Assistant|>";
-            
-            // Output think content if present
-            if (!think_content.empty()) {
-                prompt << "<think>" << think_content << "</think>";
-            }
-            
-            // Output main content
-            if (!content.empty()) {
-                prompt << content;
-            }
-            
-            // Output tool calls
-            if (!msg.tool_calls.empty()) {
-                for (const auto& tc : msg.tool_calls) {
-                    json tc_obj = tc;
-                    if (tc_obj.contains("function")) tc_obj = tc_obj["function"];
-                    
-                    prompt << "<tool_call>{\"name\": \"" 
-                           << tc_obj["name"].get<std::string>() << "\", "
-                           << "\"arguments\": " << tc_obj["arguments"].dump() 
-                           << "}</tool_call>";
-                }
-            }
-        }
-        else if (msg.role == "tool") {
-            // Tool messages are appended to the next user message or output directly
-            if (i == 0 || messages[i-1].role != "tool") {
-                prompt << "<|User|><tool_response>" << msg.content << "</tool_response>";
-            } else {
-                // Multiple tool messages in sequence
-                prompt << msg.content;
-            }
-        }
+        
+        // Message footer: <|end_of_text|>\n
+        prompt << "<|end_of_text|>\n";
     }
     
+    // Generation prompt: <|begin_of_text|>assistant\n
     if (add_generation_prompt) {
-        prompt << "<|Assistant|>";
+        prompt << "<|begin_of_text|>assistant\n";
     }
     
     return prompt.str();
