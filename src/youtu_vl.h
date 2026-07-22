@@ -55,13 +55,29 @@ public:
         const GenerateConfig& cfg,
         std::function<void(const std::string&)> callback) const;
 
+    // generate variant that also collects raw token IDs for DensePrediction
+    std::shared_ptr<ncnn_llm_gpt_ctx> generate_with_ids(
+        const std::shared_ptr<ncnn_llm_gpt_ctx>& ctx_in,
+        const GenerateConfig& cfg,
+        std::function<void(const std::string&)> callback,
+        std::vector<int>& output_ids) const;
+
     std::string run(const std::string& prompt, const std::string& image_path,
                     const GenerateConfig& cfg = GenerateConfig{});
+
+    std::string run_text(const std::string& prompt,
+                         const GenerateConfig& cfg = GenerateConfig{});
 
     bool ok() const { return ok_; }
 
 private:
     void load_youtu_config(const nlohmann::json& config);
+
+    // Post-process generated token IDs with DensePrediction coordinate conversion
+    std::string postprocess_output(const std::vector<int>& input_ids,
+                                   const std::vector<int>& output_ids,
+                                   int merger_w, int merger_h,
+                                   int image_w, int image_h) const;
 
     bool ok_ = false;
 

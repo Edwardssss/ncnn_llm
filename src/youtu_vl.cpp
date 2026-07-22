@@ -236,7 +236,7 @@ std::shared_ptr<ncnn_llm_gpt_ctx> ncnn_llm_youtu::prefill(
                                        last_cos, last_sin,
                                        kv_cache, false);
 
-    ncnn::Mat logits = llm_run_lm_head(*proj_out_net, decode_out);
+    ncnn::Mat logits = llm_run_lm_head(*proj_out_net, decode_out, model_path_);
 
     int next_token = 0;
     {
@@ -326,7 +326,7 @@ std::shared_ptr<ncnn_llm_gpt_ctx> ncnn_llm_youtu::prefill(
                                        last_cos, last_sin,
                                        kv_cache, false);
 
-    ncnn::Mat logits = llm_run_lm_head(*proj_out_net, decode_out);
+    ncnn::Mat logits = llm_run_lm_head(*proj_out_net, decode_out, model_path_);
 
     int next_token = 0;
     {
@@ -358,6 +358,16 @@ std::shared_ptr<ncnn_llm_gpt_ctx> ncnn_llm_youtu::generate(
     const GenerateConfig& cfg,
     std::function<void(const std::string&)> callback) const
 {
+    std::vector<int> dummy_ids;
+    return generate_with_ids(ctx_in, cfg, callback, dummy_ids);
+}
+
+std::shared_ptr<ncnn_llm_gpt_ctx> ncnn_llm_youtu::generate_with_ids(
+    const std::shared_ptr<ncnn_llm_gpt_ctx>& ctx_in,
+    const GenerateConfig& cfg,
+    std::function<void(const std::string&)> callback,
+    std::vector<int>& output_ids) const
+{
     const int vocab_sz = (int)bpe->vocab_size();
     auto ctx = ctx_in->clone();
     std::unordered_set<int> history;
@@ -371,8 +381,10 @@ std::shared_ptr<ncnn_llm_gpt_ctx> ncnn_llm_youtu::generate(
     for (int step = 0; step < cfg.max_new_tokens; step++) {
         if (ctx->cur_token == eos) break;
 
+        output_ids.push_back(ctx->cur_token);
+
         std::vector<int> tok = {ctx->cur_token};
-        callback(bpe->decode(tok, false));
+        callback(bpe->decode(tok, true));
 
         ncnn::Mat cur_embed = llm_run_text_embed(*embed_net, ctx->cur_token);
 
@@ -382,14 +394,14 @@ std::shared_ptr<ncnn_llm_gpt_ctx> ncnn_llm_youtu::generate(
                                    cos_cache, sin_cache, rope_theta);
         ctx->position_id++;
 
-        ncnn::Mat mask(total_len, 1);
-        mask.fill(0.0f);
+        ncnn::Mat mask_v(total_len, 1);
+        mask_v.fill(0.0f);
 
-        ncnn::Mat decode_out = mla_decoder_.forward(cur_embed, mask,
+        ncnn::Mat decode_out = mla_decoder_.forward(cur_embed, mask_v,
                                                      cos_cache, sin_cache,
                                                      kv_cache, false);
 
-        ncnn::Mat logits = llm_run_lm_head(*proj_out_net, decode_out);
+        ncnn::Mat logits = llm_run_lm_head(*proj_out_net, decode_out, model_path_);
 
         LlmTokenSampleConfig scfg;
         scfg.vocab_size = vocab_sz;
@@ -421,15 +433,174 @@ std::string ncnn_llm_youtu::run(const std::string& prompt,
         return "";
     }
 
-    std::string system_prompt = "You are a helpful assistant.";
-    std::string system_msg = apply_chat_template(
-        TemplateType::YOUTU, {{"system", system_prompt}}, {}, false, false);
+    // --- 1. Run vision encoder ---
+    ncnn::Mat image_embeds;
+    int num_patches_w = 0, num_patches_h = 0;
+    if (get_visiual_features_youtu_vl(image, image_embeds, num_patches_w, num_patches_h) != 0) {
+        fprintf(stderr, "[youtu-vl] vision failed\n");
+        return "";
+    }
+    int num_visual = image_embeds.h;
 
-    auto ctx = prefill(system_msg);
-    ctx = prefill(prompt, image, ctx);
+    // --- 2. Build full template matching HF chat_template ---
+    // Format: <|begin_of_text|>system\n...<|end_of_text|>\n<|begin_of_text|>user\n<|vision_start|><|image_pad|>...<|vision_end|>prompt<|end_of_text|>\n<|begin_of_text|>assistant\n
+    std::string system_part = "<|begin_of_text|>system\nYou are a helpful assistant.<|end_of_text|>\n<|begin_of_text|>user\n";
+
+    // Encode system+user header as text
+    auto sys_ids = bpe->encode(system_part, false, false);
+
+    std::string user_part = prompt + "<|end_of_text|>\n<|begin_of_text|>assistant\n";
+    auto user_ids = bpe->encode(user_part, false, false);
+
+    // Combine all token IDs: system_ids + vision tokens + user_ids
+    std::vector<int> ids;
+    ids.insert(ids.end(), sys_ids.begin(), sys_ids.end());
+    ids.push_back(vision_start_token_id_);
+    for (int i = 0; i < num_visual; i++)
+        ids.push_back(image_token_id_);
+    ids.push_back(vision_end_token_id_);
+    ids.insert(ids.end(), user_ids.begin(), user_ids.end());
+
+    // --- 3. Prefill all tokens (split last token for next-token prediction) ---
+    int last_id = ids.back();
+    ids.pop_back();
+
+    ncnn::Mat token_embed = llm_run_text_embed(*embed_net, ids);
+
+    // Replace <|image_pad|> positions with vision embeddings
+    int pad_idx = -1;
+    for (int i = 0; i < (int)ids.size(); i++) {
+        if (ids[i] == image_token_id_) { pad_idx = i; break; }
+    }
+    if (pad_idx >= 0) {
+        for (int i = 0; i < num_visual; i++) {
+            float* dst = token_embed.row(pad_idx + i);
+            const float* src = image_embeds.row(i);
+            memcpy(dst, src, token_embed.w * sizeof(float));
+        }
+    }
+
+    int seq_len = (int)ids.size();
+    ncnn::Mat cos_cache, sin_cache;
+    generate_rope_embed_cache(seq_len, rope_head_dim, 0,
+                               cos_cache, sin_cache, rope_theta);
+
+    ncnn::Mat mask(seq_len, seq_len);
+    mask.fill(0.0f);
+    for (int i = 0; i < seq_len; i++) {
+        float* row = mask.row(i);
+        for (int j = i + 1; j < seq_len; j++) row[j] = -1e38f;
+    }
+
+    YoutuKVCache kv_cache;
+    ncnn::Mat decode_out = mla_decoder_.forward(token_embed, mask,
+                                                  cos_cache, sin_cache,
+                                                  kv_cache, true);
+
+    // Process the last token
+    ncnn::Mat last_embed = llm_run_text_embed(*embed_net, last_id);
+
+    int total_kv = seq_len + 1;
+    ncnn::Mat last_cos, last_sin;
+    generate_rope_embed_cache(total_kv, rope_head_dim, 0,
+                               last_cos, last_sin, rope_theta);
+
+    ncnn::Mat last_mask(total_kv, 1);
+    last_mask.fill(0.0f);
+
+    decode_out = mla_decoder_.forward(last_embed, last_mask,
+                                       last_cos, last_sin,
+                                       kv_cache, false);
+
+    ncnn::Mat logits = llm_run_lm_head(*proj_out_net, decode_out, model_path_);
+
+    int next_token = 0;
+    {
+        const float* p = (const float*)logits.data;
+        float mv = p[0];
+        for (int i = 1; i < logits.w; i++)
+            if (p[i] > mv) { mv = p[i]; next_token = i; }
+    }
+
+    auto ctx = std::make_shared<ncnn_llm_gpt_base_ctx>();
+    ctx->kv_cache.resize(kv_cache.size());
+    for (size_t i = 0; i < kv_cache.size(); i++)
+        ctx->kv_cache[i] = std::make_pair(kv_cache[i], ncnn::Mat());
+    ctx->cur_token = next_token;
+    ctx->position_id = total_kv;
+
+    // --- 4. Generate with token ID collection for DensePrediction post-processing ---
+    std::vector<int> generated_ids;
+    // Greedy decoding — avoids MLA precision drift from top_p/temperature
+    GenerateConfig greedy_cfg = cfg;
+    greedy_cfg.do_sample = 0;
 
     std::string output;
     auto cb = [&output](const std::string& token) { output += token; };
-    generate(ctx, cfg, cb);
+    generate_with_ids(ctx, greedy_cfg, cb, generated_ids);
+
+    // --- 5. Apply coordinate conversion (DensePrediction) ---
+    std::string postprocessed = postprocess_output(ids, generated_ids,
+                                                    num_patches_w, num_patches_h,
+                                                    image.w, image.h);
+    if (!output.empty()) { /* keep text */ }
+    else if (!postprocessed.empty())
+        output = postprocessed;
+
+    return output;
+}
+
+std::string ncnn_llm_youtu::postprocess_output(
+    const std::vector<int>& input_ids,
+    const std::vector<int>& output_ids,
+    int merger_w, int merger_h,
+    int image_w, int image_h) const
+{
+    // Build scale factors matching HF DensePrediction
+    // vision_input = merger_grid * spatial_merge_size * patch_size
+    // spatial_merge_size = 2, patch_size = 16
+    float vision_input_w = (float)(merger_w * 2 * 16);
+    float vision_input_h = (float)(merger_h * 2 * 16);
+    float scale_x = (float)image_w / vision_input_w;
+    float scale_y = (float)image_h / vision_input_h;
+
+    std::string result;
+    for (int tid : output_ids) {
+        if (tid >= coord_x0_id_ && tid <= coord_x0_id_ + coord_max_ * 2 + 1) {
+            // Coordinate token: convert to scaled <x_N>/<y_N>
+            int offset = tid - coord_x0_id_;
+            bool is_y = (offset & 1) == 1;
+            int idx = offset >> 1;
+            if (idx < 0 || idx > coord_max_) {
+                result += bpe->decode({tid}, true);
+                continue;
+            }
+            int scaled = (int)std::round(idx * (is_y ? scale_y : scale_x));
+            scaled = std::max(0, std::min(scaled, coord_max_));
+            int new_tid = coord_x0_id_ + (scaled << 1) + (is_y ? 1 : 0);
+            result += bpe->decode({new_tid}, true);
+        } else {
+            result += bpe->decode({tid}, true);
+        }
+    }
+    return result;
+}
+
+std::string ncnn_llm_youtu::run_text(const std::string& prompt,
+                                       const GenerateConfig& cfg)
+{
+    // Match HF chat_template: always prepend system prompt (same as HF behavior)
+    std::string template_text = "<|begin_of_text|>system\nYou are a helpful assistant.<|end_of_text|>\n<|begin_of_text|>user\n" + prompt + "<|end_of_text|>\n<|begin_of_text|>assistant\n";
+
+    auto ctx = prefill(template_text);
+
+    // Use greedy for text-only (matching prefill behavior, avoiding
+    // MLA precision drift through top_p/temperature sampling).
+    GenerateConfig text_cfg = cfg;
+    text_cfg.do_sample = 0;
+
+    std::string output;
+    auto cb = [&output](const std::string& token) { output += token; };
+    generate(ctx, text_cfg, cb);
     return output;
 }

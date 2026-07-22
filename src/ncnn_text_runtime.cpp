@@ -74,11 +74,39 @@ ncnn::Mat llm_run_decoder_with_kv(ncnn::Net& decoder_net,
     return decode_out;
 }
 
-ncnn::Mat llm_run_lm_head(ncnn::Net& lm_head_net, const ncnn::Mat& hidden_states) {
+ncnn::Mat llm_run_lm_head(ncnn::Net& lm_head_net, const ncnn::Mat& hidden_states,
+                          const std::string& model_path) {
+    // Manual C++ matmul — avoids ncnn Gemm tile-based precision issue
+    // when hidden_states contain extreme values from vision embeddings.
+    static std::string cached_path;
+    static float* lm_w = nullptr;
+    static int lm_V = 0, lm_D = 0;
+    if (!lm_w || cached_path != model_path) {
+        std::string bin_path = model_path + "/youtu_lm_head.ncnn.bin";
+        FILE* fp = fopen(bin_path.c_str(), "rb");
+        if (!fp) { return ncnn::Mat(); }
+        fseek(fp, 4, SEEK_SET);  // skip 4-byte flag
+        lm_V = 283386; lm_D = 2560;
+        size_t need = (size_t)lm_V * lm_D;
+        lm_w = new float[need];
+        size_t n = fread(lm_w, 4, need, fp); fclose(fp);
+        if (n != need) { delete[] lm_w; lm_w = nullptr; return ncnn::Mat(); }
+        cached_path = model_path;
+    }
+    int B = hidden_states.h;
     ncnn::Mat logits;
-    ncnn::Extractor ex = lm_head_net.create_extractor();
-    ex.input("in0", hidden_states);
-    ex.extract("out0", logits);
+    logits.create((int)lm_V, (int)B, (size_t)4u);
+#pragma omp parallel for
+    for (int b = 0; b < B; b++) {
+        const float* inp = hidden_states.row(b);
+        float* out = logits.row(b);
+        for (int j = 0; j < lm_V; j++) {
+            const float* w = lm_w + (size_t)j * lm_D;
+            float sum = 0.f;
+            for (int k = 0; k < lm_D; k++) sum += inp[k] * w[k];
+            out[j] = sum;
+        }
+    }
     return logits;
 }
 
