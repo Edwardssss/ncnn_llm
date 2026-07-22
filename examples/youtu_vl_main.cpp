@@ -17,7 +17,7 @@ int main(int argc, char** argv) {
     std::string image_path = argc > 3 ? argv[3] : "";
     int max_tokens = argc > 4 ? std::stoi(argv[4]) : 4096;
 
-    fprintf(stderr, "[youtu_vl_run] Loading model from %s\n", model_dir.c_str());
+    printf("Loading model from %s\n", model_dir.c_str());
     ncnn_llm_youtu model(model_dir);
 
     GenerateConfig cfg;
@@ -28,16 +28,13 @@ int main(int argc, char** argv) {
     cfg.do_sample = 1;
 
     std::string output;
-    auto cb = [&output](const std::string& token) {
-        output += token;
-    };
 
     if (!image_path.empty()) {
-        fprintf(stderr, "[youtu_vl_run] Image: %s\n", image_path.c_str());
-        fprintf(stderr, "[youtu_vl_run] Prompt: \"%s\"\n", prompt.c_str());
+        printf("Image: %s\n", image_path.c_str());
+        printf("Prompt: \"%s\"\n", prompt.c_str());
         output = model.run(prompt, image_path, cfg);
     } else {
-        fprintf(stderr, "[youtu_vl_run] Text prompt: \"%s\"\n", prompt.c_str());
+        printf("Text prompt: \"%s\"\n", prompt.c_str());
         output = model.run_text(prompt, cfg);
     }
 
